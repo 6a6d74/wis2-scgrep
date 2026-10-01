@@ -14,6 +14,10 @@ tail means the messages were never sent.
 Reads the SCGRep log file (``Test period begins:`` for cycle starts and
 ``Replay message (asynchronous):`` for arrivals), so it works on any instance
 without extra instrumentation. Standard library only; ``-h`` for usage.
+
+Each profile covers one Global Replay service (``--centre``); when the log holds
+replays from several, the centre must be chosen, as their arrivals are
+independent and must not be pooled.
 """
 
 from __future__ import annotations
@@ -31,10 +35,10 @@ BEGIN_RE = re.compile(
 )
 ASYNC_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),(\d+) .*"
-    r"Replay message \(asynchronous\): centre_id=\S+ topic=(\S+) id=(\S+) "
+    r"Replay message \(asynchronous\): centre_id=(\S+) topic=(\S+) id=(\S+) "
 )
 RESULT_RE = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),(\d+) .*Result: centre_id=\S+ "
+    r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),(\d+) .*Result: centre_id=(\S+) "
     r"topic=(\S+) protocol=mqtt baseline=(\d+) fetched=(\d+) .*aborted=(\d)"
 )
 
@@ -60,23 +64,43 @@ def iter_lines(paths):
 
 
 def scan(paths, date, topic):
-    """Return (cycle_starts, arrivals, results) for the date/topic."""
-    starts, arrivals, results = [], [], []
+    """Return (cycle_starts, arrivals, results) for the date/topic.
+
+    ``arrivals`` and ``results`` are keyed by replay centre-id, so independent
+    Global Replay services are never pooled."""
+    starts, arrivals, results = [], {}, {}
     for line in iter_lines(paths):
         m = BEGIN_RE.match(line)
         if m and m[1] == date:
             starts.append((secs(m[2], m[3]), m[4], m[5]))
             continue
         m = ASYNC_RE.match(line)
-        if m and m[1] == date and topic in m[4]:
-            arrivals.append(secs(m[2], m[3]))
+        if m and m[1] == date and topic in m[5]:
+            arrivals.setdefault(m[4], []).append(secs(m[2], m[3]))
             continue
         m = RESULT_RE.match(line)
-        if m and m[1] == date and topic in m[4]:
-            results.append((secs(m[2], m[3]), int(m[5]), int(m[6]), int(m[7])))
+        if m and m[1] == date and topic in m[5]:
+            results.setdefault(m[4], []).append(
+                (secs(m[2], m[3]), int(m[6]), int(m[7]), int(m[8])))
     starts.sort()
-    arrivals.sort()
+    for times in arrivals.values():
+        times.sort()
     return starts, arrivals, results
+
+
+def resolve_centre(requested, seen):
+    """Pick the replay service to profile: ``(centre, error)``."""
+    seen = sorted(seen)
+    if requested:
+        if requested in seen:
+            return requested, None
+        found = ", ".join(seen) or "none"
+        return None, (f"No asynchronous replay lines for centre '{requested}' "
+                      f"(centres found: {found})")
+    if len(seen) > 1:
+        return None, ("Log contains replays from several Global Replay services: "
+                      f"{', '.join(seen)}. Choose one with --centre.")
+    return (seen[0] if seen else None), None
 
 
 def profile(start, window, arrivals, results, deadline_s, buckets, bar):
@@ -128,6 +152,10 @@ def build_parser():
                    help="log file(s) to scan (.log or .gz); default: logs/scgrep.log")
     p.add_argument("-t", "--topic", required=True,
                    help="topic substring to profile (e.g. uk-metoffice-globalwave)")
+    p.add_argument("-c", "--centre", metavar="CENTRE_ID",
+                   help="Global Replay service to profile (its centre-id). Required "
+                        "when the log holds replays from more than one; otherwise "
+                        "the only one found is used.")
     p.add_argument("-d", "--date", required=True, metavar="YYYY-MM-DD",
                    help="date to analyse (the log spans multiple days)")
     p.add_argument("-n", "--cycles", type=int, default=5,
@@ -149,7 +177,13 @@ def main(argv=None):
     for pat in args.log_files:
         paths.extend(glob.glob(pat) or [pat])
 
-    starts, arrivals, results = scan(paths, args.date, args.topic)
+    starts, by_centre, results_by_centre = scan(paths, args.date, args.topic)
+    centre, error = resolve_centre(args.centre, by_centre)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    arrivals = by_centre.get(centre, [])
+    results = results_by_centre.get(centre, [])
     if not starts:
         print(f"No 'Test period begins' lines for {args.date} in: {', '.join(paths)}",
               file=sys.stderr)
@@ -165,7 +199,7 @@ def main(argv=None):
     counted = [c for c in counted if c[0] >= args.min_messages]
     counted.sort(key=lambda c: -c[0])
 
-    print(f"topic '{args.topic}'  date {args.date}  cutoff = 95% of "
+    print(f"centre {centre}  topic '{args.topic}'  date {args.date}  cutoff = 95% of "
           f"{args.test_interval:g}s = {deadline:.1f}s\n")
     shown = 0
     for _n, s, w0, w1 in counted[:args.cycles]:

@@ -769,11 +769,19 @@ by message `pubtime`, and the Global Replay `datetime` filter does too.
 4. **Or let the log do it for you.** `scripts/replay_loss_report.py` performs the
    same minute-by-minute comparison directly from the SCGRep log files — no live
    queries needed. For a topic it tabulates, per one-minute pub-time window, the
-   replayed-message count, the baseline count, and their difference, then draws an
-   ASCII histogram of the difference. Both counts come from the per-message log
-   lines (`Global Broker message:` and `Replay message (…):`), de-duplicated by
-   `id`; note that per-message replay logging only exists from when that feature
-   was deployed, so windows older than that show `0` replayed.
+   baseline count and the synchronous and asynchronous replayed-message counts
+   with their differences from the baseline, then draws an ASCII histogram of
+   each difference. The counts come from the per-message log lines (`Global
+   Broker message:` and `Replay message (…):`), de-duplicated by `id` within each
+   source. Sync and async are never merged by `id`, since a replay service may
+   give each replayed message a fresh identifier. Note that per-message replay
+   logging only exists from when that feature was deployed, so windows older than
+   that show `0` replayed.
+
+   Each report covers **one Global Replay service**. When SCGRep tests several,
+   pick one with `-c <centre-id>` (the script refuses to pool them, as each is an
+   independent test); with only one in the logs it is chosen automatically. The
+   same applies to `-s summary` and to `scripts/replay_arrival_profile.py`.
 
    ```bash
    # last hour for a topic, from ./logs/scgrep.log (see -h for all options)
@@ -782,6 +790,9 @@ by message `pubtime`, and the Global Replay `datetime` filter does too.
    # a specific window, synchronous replay only
    python scripts/replay_loss_report.py -t us-noaa-nws -s sync \
      --since 2026-08-16T13:30:00Z --until 2026-08-16T14:00:00Z
+
+   # one of several Global Replay services under test
+   python scripts/replay_loss_report.py -t us-noaa-nws -c ca-eccc-msc-global-replay
    ```
 
    To line up with the **Grafana metrics** instead of clock minutes, add

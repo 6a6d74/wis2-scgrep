@@ -19,6 +19,15 @@ minute, so a message delivered by several replay brokers (or paged more than
 once) is counted once. Messages are bucketed by their pub-time (the ``time=``
 field), the same clock the replay service filters on.
 
+Synchronous and asynchronous replays are counted separately (``--source both``
+shows them side by side) rather than merged by ``id``: a replay service may give
+every replayed message a fresh identifier, so the sync and async copies of one
+message need not share an ``id``.
+
+Each report covers one Global Replay service (``--centre``). When the logs hold
+replays from several, the centre must be chosen explicitly: their replies are
+independent tests and must not be pooled.
+
 Counts are only meaningful for windows that SCGRep has actually replay-tested
 (roughly ``TIME_LAG`` behind now), so by default the reporting window ends at the
 most recent replayed message found in the logs rather than at the wall clock.
@@ -62,7 +71,8 @@ BASELINE_RE = re.compile(
 )
 REPLAY_RE = re.compile(
     r"Replay message \((?P<kind>synchronous|asynchronous)\): "
-    r"centre_id=\S+ topic=(?P<topic>\S+) id=(?P<id>\S+) time=(?P<time>\S+)"
+    r"centre_id=(?P<centre>\S+) topic=(?P<topic>\S+) id=(?P<id>\S+) "
+    r"time=(?P<time>\S+)"
 )
 
 # Per-cycle summary lines (the values SCGRep publishes to Prometheus / Grafana):
@@ -76,10 +86,12 @@ RESULT_RE = re.compile(
 # --source values selecting which replayed *per-message* lines to count. The
 # additional value "summary" switches to the per-cycle summary lines instead.
 SOURCES = {
-    "both": {"synchronous", "asynchronous"},
-    "sync": {"synchronous"},
-    "async": {"asynchronous"},
+    "both": ("synchronous", "asynchronous"),
+    "sync": ("synchronous",),
+    "async": ("asynchronous",),
 }
+# Column / legend label for each replay kind.
+KIND_LABEL = {"synchronous": "sync", "asynchronous": "async"}
 
 
 def parse_pubtime(value: str) -> datetime | None:
@@ -112,11 +124,17 @@ def iter_log_lines(paths: list[str]):
             print(f"warning: log file not found: {path}", file=sys.stderr)
 
 
-def scan(lines, topic: str, sources: set[str]):
-    """Scan log lines, returning ``(baseline, replay)`` dicts mapping each
-    minute-bucket datetime to the set of unique message ids in that minute."""
+def scan(lines, topic: str):
+    """Scan log lines, returning ``(baseline, replay)``.
+
+    ``baseline`` maps each minute-bucket datetime to the set of unique message
+    ids in that minute. ``replay`` holds the same per replay service and kind:
+    ``replay[centre][kind][minute]``. Ids are never pooled across centres or
+    kinds, so a fresh identifier per replayed message cannot double-count."""
     baseline: dict[datetime, set[str]] = defaultdict(set)
-    replay: dict[datetime, set[str]] = defaultdict(set)
+    replay: dict[str, dict[str, dict[datetime, set[str]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(set))
+    )
     for line in lines:
         match = BASELINE_RE.search(line)
         if match:
@@ -126,16 +144,38 @@ def scan(lines, topic: str, sources: set[str]):
                     baseline[floor_minute(dt)].add(match["id"])
             continue
         match = REPLAY_RE.search(line)
-        if match and match["kind"] in sources and topic in match["topic"]:
+        if match and topic in match["topic"]:
             dt = parse_pubtime(match["time"])
             if dt is not None:
-                replay[floor_minute(dt)].add(match["id"])
+                replay[match["centre"]][match["kind"]][floor_minute(dt)].add(match["id"])
     return baseline, replay
 
 
+def resolve_centre(requested: str | None, seen) -> tuple[str | None, str | None]:
+    """Pick the replay service to report on: ``(centre, error)``.
+
+    An explicit ``--centre`` must appear in the logs. Without one, a single
+    centre is used automatically; several is an error, because pooling
+    independent replay services would make the counts meaningless."""
+    seen = sorted(seen)
+    if requested:
+        if requested in seen:
+            return requested, None
+        found = ", ".join(seen) or "none"
+        return None, (f"No replay lines for centre '{requested}' "
+                      f"(centres found: {found})")
+    if len(seen) > 1:
+        return None, ("Logs contain replays from several Global Replay services: "
+                      f"{', '.join(seen)}. Choose one with --centre.")
+    return (seen[0] if seen else None), None
+
+
 def window_bounds(args, baseline, replay):
-    """Resolve the [since, until] minute-bucket range to report over."""
-    all_minutes = set(baseline) | set(replay)
+    """Resolve the [since, until] minute-bucket range to report over.
+
+    ``replay`` is any mapping (or iterable) of replayed minute buckets."""
+    replay = set(replay)
+    all_minutes = set(baseline) | replay
     until = (
         floor_minute(parse_pubtime(args.until))
         if args.until
@@ -151,17 +191,21 @@ def window_bounds(args, baseline, replay):
     return since, until
 
 
-def build_rows(baseline, replay, since, until):
-    """One row per minute-with-activity in range: (minute, replay, baseline, diff)."""
+def build_rows(baseline, replays, since, until):
+    """One row per minute-with-activity in range: ``(minute, baseline, counts)``.
+
+    ``replays`` is a list of minute->ids mappings, one per replay kind shown;
+    ``counts`` is the matching list of per-kind replay counts."""
+    minutes = set(baseline).union(*replays)
     rows = []
-    for minute in sorted(set(baseline) | set(replay)):
+    for minute in sorted(minutes):
         if minute < since or minute > until:
             continue
         b = len(baseline.get(minute, ()))
-        r = len(replay.get(minute, ()))
-        if b == 0 and r == 0:
+        counts = [len(r.get(minute, ())) for r in replays]
+        if b == 0 and not any(counts):
             continue
-        rows.append((minute, r, b, b - r))
+        rows.append((minute, b, counts))
     return rows
 
 
@@ -170,18 +214,26 @@ def window_label(minute: datetime) -> str:
     return f"{minute:%Y-%m-%d %H:%M}–{end:%H:%M}"
 
 
-def print_table(rows) -> None:
+def print_table(rows, labels) -> None:
+    """Baseline, then a count and a difference (baseline − count) per kind."""
     label_w = max((len(window_label(m)) for m, *_ in rows), default=17)
-    header = f"{'Pub-time window (UTC)':<{label_w}}  {'Replay':>8}  {'Baseline':>8}  {'Diff':>7}"
+    header = f"{'Pub-time window (UTC)':<{label_w}}  {'Baseline':>8}"
+    header += "".join(f"  {label:>6}" for label in labels)
+    header += "".join(f"  {label + 'Δ':>6}" for label in labels)
     print(header)
     print("-" * len(header))
-    tot_r = tot_b = 0
-    for minute, r, b, diff in rows:
-        print(f"{window_label(minute):<{label_w}}  {r:>8}  {b:>8}  {diff:>+7}")
-        tot_r += r
-        tot_b += b
+
+    def line(label, b, counts):
+        text = f"{label:<{label_w}}  {b:>8}"
+        text += "".join(f"  {c:>6}" for c in counts)
+        text += "".join(f"  {b - c:>+6}" for c in counts)
+        print(text)
+
+    for minute, b, counts in rows:
+        line(window_label(minute), b, counts)
     print("-" * len(header))
-    print(f"{'TOTAL':<{label_w}}  {tot_r:>8}  {tot_b:>8}  {tot_b - tot_r:>+7}")
+    line("TOTAL", sum(b for _, b, _ in rows),
+         [sum(c[i] for *_, c in rows) for i in range(len(labels))])
 
 
 def print_histogram(items, bar_width: int | None, legend: str) -> None:
@@ -290,6 +342,11 @@ def print_summary_table(rows) -> None:
 
 def run_summary(args, paths) -> int:
     records = scan_summary(iter_log_lines(paths), args.topic)
+    centre, error = resolve_centre(args.centre, {key[2] for key in records})
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    records = {key: rec for key, rec in records.items() if key[2] == centre}
     since, until = window_bounds_summary(args, records)
     if since is None:
         print(f"No summary lines found for topic '{args.topic}' in: {', '.join(paths)}",
@@ -298,7 +355,8 @@ def run_summary(args, paths) -> int:
     series = sorted({(c, t) for (s, _e, c, t) in records if since <= s <= until})
     rows = build_summary_rows(records, since, until)
 
-    print(f"Topic:  {args.topic}    Source: summary (per tested window)")
+    print(f"Topic:  {args.topic}    Source: summary (per tested window)    "
+          f"Centre: {centre}")
     print(f"Window: {since:%Y-%m-%d %H:%M:%S} .. {until:%Y-%m-%d %H:%M:%S} UTC "
           f"(window starts)")
     for centre, topic in series:
@@ -321,8 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="replay_loss_report.py",
         description=(
-            "Scan SCGRep log files and report, minute-by-minute for one topic, "
-            "the replay vs baseline message counts and their difference (where a "
+            "Scan SCGRep log files and report, minute-by-minute for one topic and "
+            "one Global Replay service, the replay vs baseline message counts and their difference (where a "
             "Global Replay service may be losing messages)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -337,6 +395,8 @@ def build_parser() -> argparse.ArgumentParser:
             "      --since 2026-08-16T12:00:00Z --until 2026-08-16T13:00:00Z\n\n"
             "  # per-cycle summary, to line up with the Grafana metrics\n"
             "  replay_loss_report.py -t us-noaa-nws -s summary\n\n"
+            "  # one of several Global Replay services under test\n"
+            "  replay_loss_report.py -t us-noaa-nws -c ca-eccc-msc-global-replay\n\n"
             "The topic is matched as a substring of the log's topic= field, so "
             "'us-noaa-nws' matches both the concrete baseline topics and the "
             "'.../#' replay wildcard.\n\n"
@@ -364,10 +424,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-s", "--source", choices=[*sorted(SOURCES), "summary"], default="both",
         help="what to count. Per-message modes count individual replayed messages "
-             "(de-duplicated by id) into clock-minute buckets: 'both' (default), "
-             "'sync', or 'async'. 'summary' instead reads the per-cycle summary "
-             "lines (baseline / fetched) over the exact tested windows, so counts "
-             "match the Prometheus/Grafana metrics.",
+             "(de-duplicated by id) into clock-minute buckets: 'both' (default; "
+             "sync and async side by side, never merged), 'sync', or 'async'. "
+             "'summary' instead reads the per-cycle summary lines (baseline / "
+             "fetched) over the exact tested windows, so counts match the "
+             "Prometheus/Grafana metrics.",
+    )
+    parser.add_argument(
+        "-c", "--centre", metavar="CENTRE_ID",
+        help="Global Replay service to report on (its centre-id, e.g. "
+             "ca-eccc-msc-global-replay). Required when the logs hold replays "
+             "from more than one; otherwise the only one found is used.",
     )
     parser.add_argument(
         "--since", metavar="ISO8601",
@@ -396,15 +463,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.source == "summary":
         return run_summary(args, paths)
 
-    baseline, replay = scan(iter_log_lines(paths), args.topic, SOURCES[args.source])
-    since, until = window_bounds(args, baseline, replay)
+    baseline, by_centre = scan(iter_log_lines(paths), args.topic)
+    centre, error = resolve_centre(args.centre, by_centre)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    kinds = SOURCES[args.source]
+    by_kind = by_centre.get(centre, {})
+    replays = [by_kind.get(kind, {}) for kind in kinds]
+    labels = [KIND_LABEL[kind] for kind in kinds]
+    since, until = window_bounds(args, baseline, set().union(*replays))
     if since is None:
         print(f"No messages found for topic '{args.topic}' in: {', '.join(paths)}",
               file=sys.stderr)
         return 1
 
-    rows = build_rows(baseline, replay, since, until)
-    print(f"Topic:  {args.topic}    Replay source: {args.source}")
+    rows = build_rows(baseline, replays, since, until)
+    print(f"Topic:  {args.topic}    Replay source: {args.source}    "
+          f"Centre: {centre or '(no replays found)'}")
     print(f"Window: {since:%Y-%m-%d %H:%M} .. {until + timedelta(minutes=1):%Y-%m-%d %H:%M} UTC "
           f"({args.minutes} min)" if not (args.since or args.until)
           else f"Window: {since:%Y-%m-%d %H:%M} .. {until + timedelta(minutes=1):%Y-%m-%d %H:%M} UTC")
@@ -412,11 +488,13 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print("No baseline or replay messages in the selected window.")
         return 0
-    print_table(rows)
-    print_histogram(
-        [(window_label(m), diff) for m, _r, _b, diff in rows], args.bar_width,
-        "Difference histogram (baseline − replay; '#' = messages missing from replay):",
-    )
+    print_table(rows, labels)
+    for i, label in enumerate(labels):
+        print_histogram(
+            [(window_label(m), b - counts[i]) for m, b, counts in rows], args.bar_width,
+            f"Difference histogram (baseline − {label} replay; "
+            "'#' = messages missing from replay):",
+        )
     return 0
 
 
