@@ -160,18 +160,34 @@ def discover_scgrep_config(logfile: str | None = None) -> ScgrepConfig:
         path = Path(logfile)
         if not path.exists():
             raise RuntimeError(f"Log file not found: {logfile}")
-        lines = path.read_text().splitlines()
+        try:
+            result = subprocess.run(
+                ["grep", "-a", "Subscribed on", str(path)],
+                capture_output=True, text=True, timeout=15,
+            )
+            lines = result.stdout.splitlines()
+        except Exception as exc:
+            raise RuntimeError(f"Could not grep log file {logfile}: {exc}") from exc
     else:
-        # Prefer the SCGRep log file: it is trimmed to 24 h and always contains
-        # the most-recent startup lines.
+        # Prefer the SCGRep log file.  It can be large (> 1 GB) so grep for
+        # only the lines we need rather than reading the whole file.
         candidates = [
             Path(__file__).parent.parent / "logs" / "scgrep.log",
             Path("logs/scgrep.log"),
         ]
         for p in candidates:
-            if p.exists() and any("Subscribed on" in l for l in p.read_text().splitlines()):
-                lines = p.read_text().splitlines()
-                break
+            if p.exists():
+                try:
+                    result = subprocess.run(
+                        ["grep", "-a", "Subscribed on", str(p)],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    candidate_lines = result.stdout.splitlines()
+                    if candidate_lines:
+                        lines = candidate_lines
+                        break
+                except Exception:
+                    pass
 
         if not any("Subscribed on" in l for l in lines):
             # Fall back to docker logs (last 2 days covers any startup)
