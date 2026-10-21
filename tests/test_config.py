@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 
 from scgrep.config import BrokerConfig, Config, ConfigError
@@ -136,8 +138,33 @@ def test_replay_wildcard_topics():
     cfg = Config.from_env(dict(BASE_ENV))
     topics = cfg.replay_wildcard_topics()
     assert topics == [
-        f"replay/a/wis2/ca-eccc-msc-global-replay/{cfg.subscriber_id}/#"
+        f"replay/a/wis2/ca-eccc-msc-global-replay/"
+        f"{cfg.subscriber_id_for('ca-eccc-msc-global-replay')}/#"
     ]
+
+
+def test_subscriber_id_differs_per_replay_instance():
+    # A shared id let kr-kma, misconfigured as ca-eccc, publish onto ca-eccc's
+    # subscribed channel and double its async count. Each instance must get its
+    # own (stable, UUID-valid) subscriber-id and wildcard.
+    env = dict(
+        BASE_ENV,
+        GLOBAL_REPLAY_CENTRE_IDS="ca-eccc-msc-global-replay,kr-kma-global-replay",
+        GLOBAL_REPLAY_URLS="https://ca.example,https://kr.example",
+    )
+    cfg = Config.from_env(env)
+    ca = cfg.subscriber_id_for("ca-eccc-msc-global-replay")
+    kr = cfg.subscriber_id_for("kr-kma-global-replay")
+    assert ca != kr
+    assert ca == cfg.subscriber_id_for("ca-eccc-msc-global-replay")
+    for sid in (ca, kr):
+        assert str(uuid.UUID(sid)) == sid
+    assert cfg.replay_wildcard_topics() == [
+        f"replay/a/wis2/ca-eccc-msc-global-replay/{ca}/#",
+        f"replay/a/wis2/kr-kma-global-replay/{kr}/#",
+    ]
+    # ca-eccc's channel under kr's id is not subscribed to.
+    assert f"replay/a/wis2/ca-eccc-msc-global-replay/{kr}/#" not in cfg.replay_wildcard_topics()
 
 
 def test_broker_url_parsing():

@@ -50,7 +50,7 @@ def test_run_cycle_publishes_all_metrics():
     store.store_message("a", in_window, TOPIC)
     store.store_message("b", in_window, TOPIC)
 
-    channel = f"replay/a/wis2/{CENTRE}/{cfg.subscriber_id}/{TOPIC}"
+    channel = f"replay/a/wis2/{CENTRE}/{cfg.subscriber_id_for(CENTRE)}/{TOPIC}"
     responses.add(
         responses.GET, ITEMS_URL,
         json={
@@ -127,7 +127,7 @@ def test_run_cycle_replay_gap_does_not_abort_mqtt():
     store.store_message("a", in_window, TOPIC)
     store.store_message("b", in_window, TOPIC)  # baseline = 2
 
-    channel = f"replay/a/wis2/{CENTRE}/{cfg.subscriber_id}/{TOPIC}"
+    channel = f"replay/a/wis2/{CENTRE}/{cfg.subscriber_id_for(CENTRE)}/{TOPIC}"
     responses.add(
         responses.GET, ITEMS_URL,
         json={"type": "FeatureCollection", "numberMatched": 0, "features": [], "links": []},

@@ -77,10 +77,22 @@ class Config:
         """(centre_id, url) pairs for every Global Replay service under test."""
         return list(zip(self.replay_centre_ids, self.replay_urls))
 
+    def subscriber_id_for(self, centre_id: str) -> str:
+        """The subscriber-id sent to (and subscribed for) one Global Replay.
+
+        Each instance gets its own UUID, derived deterministically from
+        ``subscriber_id``. With a shared id, an instance misconfigured with
+        another's centre-id publishes onto that centre's channel and is counted
+        as its replays (kr-kma did this as ca-eccc until 2026-10-21, doubling
+        ca-eccc's async count). With distinct ids those messages land on a
+        channel SCGRep never subscribes to.
+        """
+        return str(uuid.uuid5(uuid.UUID(self.subscriber_id), centre_id))
+
     def replay_wildcard_topics(self) -> list[str]:
         """MQTT topics to subscribe to for asynchronous replay responses."""
         return [
-            f"replay/a/wis2/{centre_id}/{self.subscriber_id}/#"
+            f"replay/a/wis2/{centre_id}/{self.subscriber_id_for(centre_id)}/#"
             for centre_id in self.replay_centre_ids
         ]
 

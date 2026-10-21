@@ -95,7 +95,8 @@ def run_cycle(
                 # The async fetch expects replay messages only when the replay's
                 # own numberMatched (from the synchronous fetch above) is > 0.
                 futures[ex.submit(
-                    async_fetch, replay_url, centre_id, topic, config.subscriber_id,
+                    async_fetch, replay_url, centre_id, topic,
+                    config.subscriber_id_for(centre_id),
                     broker_authorities, start_iso, end_iso, deadline_s, registry,
                     baselines[topic],
                     number_matched_provider=_number_matched_from(sync_future),

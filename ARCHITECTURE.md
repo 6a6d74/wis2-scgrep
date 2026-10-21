@@ -70,8 +70,11 @@ Parses and validates every environment variable into an immutable `Config`
 dataclass, and parses each MQTT URL into a `BrokerConfig` (host, port, TLS,
 credentials). It enforces invariants (e.g. `GLOBAL_REPLAY_CENTRE_IDS` and
 `GLOBAL_REPLAY_URLS` must be the same length) and fails fast with a clear error.
-It also generates the unique **subscriber UUID** used to build the per-subscriber
-replay topics, and derives `redis_expiry = TIME_LAG + TEST_INTERVAL + 60`.
+It also generates the unique **subscriber UUID**, from which
+`subscriber_id_for(centre_id)` derives (uuid5) a distinct subscriber-id per Global
+Replay service — sent in that service's async request and used in its replay
+topic, so one instance publishing under another's centre-id cannot be counted as
+the other's replays — and derives `redis_expiry = TIME_LAG + TEST_INTERVAL + 60`.
 
 ### `mqtt_client.py` — broker connectivity and message routing
 

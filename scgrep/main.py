@@ -172,6 +172,11 @@ def main() -> int:
         "Starting SCGRep sensor centre %s (subscriber-id=%s)",
         config.sensor_centre_id, config.subscriber_id,
     )
+    for centre_id, _ in config.replay_targets:
+        logger.info(
+            "Global Replay %s: subscriber-id=%s",
+            centre_id, config.subscriber_id_for(centre_id),
+        )
     logger.info(
         "Testing %d topic(s) against %d Global Replay service(s)",
         len(config.subscription_topics), len(config.replay_targets),

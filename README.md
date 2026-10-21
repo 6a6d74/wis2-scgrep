@@ -30,12 +30,17 @@ retrieval paths.
 > For a component-by-component description of the codebase and the Docker stack,
 > see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
-1. **On start-up** SCGRep generates a unique subscriber UUID and connects to
+1. **On start-up** SCGRep generates a unique subscriber UUID — and from it a
+   distinct, stable subscriber-id per Global Replay service — and connects to
    every configured Global Broker, subscribing to:
    - the topics under test (`SUBSCRIPTION_TOPICS`), and
    - the per-subscriber replay topics
      `replay/a/wis2/<centre-id>/<subscriber-id>/#` for each Global Replay
-     service.
+     service, each with that service's own subscriber-id. Sharing one id would
+     let an instance misconfigured with another's centre-id publish onto that
+     centre's channel and inflate its async count (kr-kma, publishing as
+     ca-eccc, doubled ca-eccc's count until 2026-10-21); with distinct ids such
+     messages land on a channel SCGRep never subscribes to.
 2. **On every broker message** it records `id`, `time`
    (`time` or `properties.pubtime`) and `topic` in Redis. Duplicate `id`s
    (which legitimately arrive from multiple brokers) are discarded; records
@@ -160,8 +165,8 @@ What this does **not** avoid:
   are unaffected.
 - The few seconds the container is down are missed on every topic, showing up
   `TIME_LAG` later as a small baseline dip in one or two cycles.
-- SCGRep generates a **new subscriber UUID** on start, so the replay channel
-  changes; it re-subscribes before the first request, so nothing is lost.
+- SCGRep generates a **new subscriber UUID** on start, so the replay channels
+  change; it re-subscribes before the first request, so nothing is lost.
 
 (Redis keys carry a `TIME_LAG + TEST_INTERVAL + 60` second TTL, so if SCGRep is
 down longer than that the baseline expires regardless.)
