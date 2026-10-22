@@ -207,6 +207,7 @@ class MqttManager:
                 client.tls_set()
         client.on_connect = self._make_on_connect(broker, subscriptions, role)
         client.on_disconnect = self._make_on_disconnect(broker)
+        client.on_connect_fail = self._make_on_connect_fail(broker)
         client.on_message = self._track_messages(self._broker_url(broker))
         return client
 
@@ -237,6 +238,19 @@ class MqttManager:
             self._set_broker_status(broker, False)
 
         return on_disconnect
+
+    def _make_on_connect_fail(self, broker: BrokerConfig):
+        # paho reports a connection that never opens (TCP/TLS timeout, refused,
+        # DNS failure) only here, not via on_connect or on_disconnect. Without
+        # this a firewall blocking the broker port leaves no log line at all.
+        # Retries back off to 60 s, so this is at most ~1 line/minute/broker.
+        def on_connect_fail(client, userdata):
+            logger.warning(
+                "Could not connect to %s:%d; retrying", broker.host, broker.port
+            )
+            self._set_broker_status(broker, False)
+
+        return on_connect_fail
 
     def _connect(self, client: mqtt.Client, broker: BrokerConfig) -> None:
         # Publish an initial "disconnected" reading so the series exists from

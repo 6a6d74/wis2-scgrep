@@ -545,7 +545,10 @@ so it is always captured unless explicitly turned off with `LOG_LEVEL=WARNING`
 (which keeps only the warnings/errors):
 
 - **Broker connections** — each Global Broker and replay broker connection, and
-  the exact topics subscribed on it.
+  the exact topics subscribed on it. A connection that can't be established at
+  all (timeout, refusal or DNS failure — e.g. a firewall blocking port 8883) is
+  logged at `WARNING` as `Could not connect to <host>:<port>; retrying`, once
+  per retry (backing off to 60 s).
 - **Test period start/finish** — the window each period covers.
 - **Unique broker messages** — every newly-seen message from the Global Brokers
   (`topic`, `id`, `time`); duplicates that are discarded are not logged.

@@ -63,6 +63,23 @@ def test_on_disconnect_sets_status_0():
     assert _status(metrics) == 0
 
 
+def test_on_connect_fail_logs_warning_and_sets_status_0(caplog):
+    mgr, metrics = _mgr()
+    mgr._make_on_connect(BROKER, [], "Global Broker")(Mock(), None, None, 0)
+    with caplog.at_level(logging.WARNING, logger="scgrep"):
+        mgr._make_on_connect_fail(BROKER)(Mock(), None)
+    assert _status(metrics) == 0
+    assert "Could not connect to globalbroker.meteo.fr:8883" in caplog.text
+
+
+def test_built_client_handles_connect_fail():
+    """paho reports a connection that never opens only via on_connect_fail
+    (e.g. a firewall dropping port 8883), so it must be wired up."""
+    mgr, _ = _mgr()
+    client = mgr._build_client(BROKER, [], "Global Broker")
+    assert client.on_connect_fail is not None
+
+
 def _age(metrics, url=URL):
     # set_function() values are produced at collection time, so read the sample
     # from the registry rather than the child's stored value.

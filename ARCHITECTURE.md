@@ -100,6 +100,12 @@ subscriptions it serves. So a broker that is both a Global Broker and a replay
 broker (the blank case) is a single connection subscribed to both the test topics
 and the replay wildcards — no duplicate client id.
 
+Each client sets `broker_status_flag` from three paho callbacks: `on_connect`
+(1, or 0 on a non-zero reason code), `on_disconnect` (0), and
+`on_connect_fail` (0, logged at `WARNING`). The last matters because paho
+reports a connection that never opens — a timeout or refusal, such as a
+firewall blocking 8883 — only there; without it that failure left no log line.
+
 `MessageHandler.on_message` runs on paho's network thread and routes each message:
 
 - topics starting with `replay/` → the `ReplayRegistry` (first-arrival timing)
