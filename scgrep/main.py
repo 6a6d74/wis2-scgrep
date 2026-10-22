@@ -29,23 +29,39 @@ def _configure_logging() -> None:
     ``LOG_FILE_FLUSH_INTERVAL`` seconds (default 60); errors are flushed at once.
     A ``WatchedFileHandler`` reopens the file if it is replaced, so the external
     hourly purge works cleanly.
+
+    ``LOG_STDOUT_LEVEL`` (default: ``LOG_LEVEL``) raises the threshold for stdout
+    only, so the file can keep full ``INFO`` detail while stdout carries just
+    warnings. Where stdout is shipped and billed per byte (CloudWatch on AWS),
+    ``INFO`` there is ~1 GB/day. It can't go below ``LOG_LEVEL``: records the
+    root logger drops never reach any handler.
     """
-    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    root_level = _level_from_env("LOG_LEVEL", logging.INFO)
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     formatter.converter = time.gmtime  # UTC timestamps
 
     root = logging.getLogger()
-    root.setLevel(getattr(logging, level_name, logging.INFO))
+    root.setLevel(root_level)
     for handler in list(root.handlers):
         root.removeHandler(handler)
 
     stream = logging.StreamHandler()
     stream.setFormatter(formatter)
+    stream.setLevel(_level_from_env("LOG_STDOUT_LEVEL", root_level))
     root.addHandler(stream)
 
     log_file = os.environ.get("LOG_FILE", "").strip()
     if log_file:
         _add_periodic_file_logging(root, log_file, formatter)
+
+
+def _level_from_env(name: str, default: int) -> int:
+    """Log level named by env var ``name`` (e.g. ``WARNING``), else ``default``.
+
+    Unset, blank or unknown names fall back to ``default``.
+    """
+    value = getattr(logging, os.environ.get(name, "").strip().upper(), None)
+    return value if isinstance(value, int) else default
 
 
 def _add_periodic_file_logging(root, log_file: str, formatter) -> None:

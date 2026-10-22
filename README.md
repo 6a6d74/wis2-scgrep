@@ -229,6 +229,7 @@ All configuration is via environment variables (see `.env.example`).
 | `TEST_INTERVAL` | `300` | Seconds between test cycles. |
 | `REDIS_STARTUP_TIMEOUT` | `60` | Seconds to wait for Redis to become reachable on startup before giving up. |
 | `LOG_LEVEL` | `INFO` | Python log level. The detailed activity logs are at `INFO`; set `WARNING` to keep only warnings/errors, or `DEBUG` to additionally log **every** MQTT message received (see Logging). |
+| `LOG_STDOUT_LEVEL` | *(= `LOG_LEVEL`)* | Raise the level for **stdout only**, e.g. `WARNING` to keep stdout quiet while `LOG_FILE` keeps full `INFO` detail. Useful where stdout is shipped and billed per byte (`INFO` is ~1 GB/day). Can't be lower than `LOG_LEVEL`. |
 | `LOG_HTTP_RESPONSE_MAX_CHARS` | `1000` | Max characters of an HTTP response body written to the log (longer bodies are truncated). |
 | `LOG_FILE` | *(unset)* | Also write logs to this file (in addition to stdout). Unset/blank = stdout only. |
 | `LOG_FILE_FLUSH_INTERVAL` | `60` | How often (seconds) buffered logs are written to `LOG_FILE`. |
@@ -590,6 +591,11 @@ buffered and written every `LOG_FILE_FLUSH_INTERVAL` seconds (default 60) —
 so the file updates in batches, not live (use stdout for a live tail); errors are
 written immediately. A `WatchedFileHandler` reopens the file if it is replaced,
 so the file can be trimmed underneath a running app.
+
+The file and stdout can run at different levels. `LOG_LEVEL` sets the floor for
+both, and `LOG_STDOUT_LEVEL` can raise stdout's threshold alone. For example,
+`LOG_LEVEL=INFO` with `LOG_STDOUT_LEVEL=WARNING` keeps the full activity log in
+the file while stdout carries only warnings and errors.
 
 In the Compose deployment this is enabled and points at
 `/var/log/scgrep/scgrep.log`, mounted to `./logs/scgrep.log` on the host.

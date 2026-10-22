@@ -272,7 +272,8 @@ interval, then the loop sleeps the remainder). `SIGTERM`/`SIGINT` stop the loop
 and disconnect cleanly. It also configures logging (`LOG_LEVEL`, default `INFO`)
 with a UTC-timestamped format; the detailed activity logs (connections, messages,
 requests/responses, per-result summaries) are at `INFO` — see the
-[README](README.md#logging). When `LOG_FILE` is set, records are also buffered
+[README](README.md#logging). `LOG_STDOUT_LEVEL` (default `LOG_LEVEL`) sets a
+higher threshold on the stdout handler alone. When `LOG_FILE` is set, records are also buffered
 and written to that file every `LOG_FILE_FLUSH_INTERVAL` seconds via a
 `MemoryHandler` → `WatchedFileHandler`; the latter reopens the file if it is
 replaced, so the hourly `scripts/purge_logs.py` (the `log-purge` service) can
