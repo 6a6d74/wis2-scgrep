@@ -82,24 +82,85 @@ def _add_periodic_file_logging(root, log_file: str, formatter) -> None:
         return
     file_handler.setFormatter(formatter)
 
-    # Buffer records and write them to the file in batches every `interval`
-    # seconds; flush immediately on errors so they are never lost.
-    memory = logging.handlers.MemoryHandler(
-        capacity=100_000, flushLevel=logging.ERROR, target=file_handler
-    )
-    root.addHandler(memory)
+    batched = _BatchedFileHandler(file_handler)
+    root.addHandler(batched)
 
     def flush_periodically() -> None:
         while True:
-            time.sleep(interval)
-            memory.flush()
+            batched.wake.wait(interval)
+            batched.wake.clear()
+            batched.flush()
 
     threading.Thread(
         target=flush_periodically, name="log-file-flush", daemon=True
     ).start()
-    atexit.register(memory.close)  # flushes the final batch on shutdown
+    atexit.register(batched.close)  # flushes the final batch on shutdown
 
     logger.info("Writing logs to %s (flushed every %.0fs)", log_file, interval)
+
+
+class _BatchedFileHandler(logging.Handler):
+    """Buffer records; write them to ``target`` in one batch per flush.
+
+    Logging threads only append to the buffer. ``flush`` takes the buffer
+    under the handler lock but writes it *outside* that lock, with a single
+    stat-and-reopen check and a single write. ``logging.handlers.MemoryHandler``
+    instead passes each record to the target while holding its lock, and
+    ``WatchedFileHandler`` stats the file and flushes it per record. On EFS
+    (NFS) a minute's ~10k records took 10–80 s that way, and every logging
+    thread blocked meanwhile, including paho's network thread, which then
+    missed its keepalive and was disconnected.
+
+    An ERROR record sets ``wake`` so the flush thread writes it at once.
+    """
+
+    def __init__(self, target: logging.handlers.WatchedFileHandler) -> None:
+        super().__init__()
+        self.target = target
+        self.wake = threading.Event()
+        self._buffer: list[logging.LogRecord] = []
+        # Taken while still holding the handler lock, so batches reach the
+        # file in the order they were taken.
+        self._write_lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._buffer.append(record)
+        if record.levelno >= logging.ERROR:
+            self.wake.set()
+
+    def flush(self) -> None:
+        self.acquire()
+        try:
+            records, self._buffer = self._buffer, []
+            self._write_lock.acquire()
+        finally:
+            self.release()
+        try:
+            if records:
+                self._write(records)
+        finally:
+            self._write_lock.release()
+
+    def _write(self, records: list[logging.LogRecord]) -> None:
+        target = self.target
+        try:
+            text = "".join(target.format(r) + target.terminator for r in records)
+            target.acquire()
+            try:
+                target.reopenIfNeeded()
+                target.stream.write(text)
+                target.stream.flush()
+            finally:
+                target.release()
+        except Exception:
+            self.handleError(records[-1])
+
+    def close(self) -> None:
+        try:
+            self.flush()
+            self.target.close()
+        finally:
+            super().close()
 
 
 def _wait_for_redis(

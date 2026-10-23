@@ -593,7 +593,9 @@ Set `LOG_FILE` to also write logs to a file (in addition to stdout). Records are
 buffered and written every `LOG_FILE_FLUSH_INTERVAL` seconds (default 60) —
 so the file updates in batches, not live (use stdout for a live tail); errors are
 written immediately. A `WatchedFileHandler` reopens the file if it is replaced,
-so the file can be trimmed underneath a running app.
+so the file can be trimmed underneath a running app. Each batch is one write made
+outside the logging lock, so a slow disk (e.g. a network file system) delays only
+the file, never the app.
 
 The file and stdout can run at different levels. `LOG_LEVEL` sets the floor for
 both, and `LOG_STDOUT_LEVEL` can raise stdout's threshold alone. For example,

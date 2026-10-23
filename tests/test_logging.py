@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 
 import pytest
 
@@ -69,3 +71,86 @@ def test_stdout_level_defaults_to_log_level(monkeypatch, capsys, restore_root_lo
 def test_level_from_env(monkeypatch, value, expected):
     monkeypatch.setenv("SCGREP_TEST_LEVEL", value)
     assert _level_from_env("SCGREP_TEST_LEVEL", logging.INFO) == expected
+
+
+class _RecordingStream:
+    """Stands in for the log file's stream: counts writes, can block them."""
+
+    def __init__(self, block=False):
+        self.writes = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        if not block:
+            self.release.set()
+
+    def write(self, text):
+        self.entered.set()
+        self.release.wait(10)
+        self.writes.append(text)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.release.set()
+
+
+def _file_logging(monkeypatch, tmp_path, stream, interval="3600"):
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "scgrep.log"))
+    monkeypatch.setenv("LOG_FILE_FLUSH_INTERVAL", interval)
+    _configure_logging()
+    (handler,) = [h for h in logging.getLogger().handlers if hasattr(h, "target")]
+    handler.flush()  # write the "Writing logs to …" line to the real file
+    handler.target.stream = stream
+    return handler
+
+
+def test_logging_is_not_blocked_while_the_file_write_is_slow(
+    monkeypatch, tmp_path, restore_root_logging
+):
+    # On EFS a flush took up to 80 s; logging threads (paho's among them)
+    # must not wait for it.
+    stream = _RecordingStream(block=True)
+    handler = _file_logging(monkeypatch, tmp_path, stream)
+    log = logging.getLogger("scgrep.test")
+    log.info("before-flush")
+    flusher = threading.Thread(target=handler.flush, daemon=True)
+    flusher.start()
+    assert stream.entered.wait(5)
+
+    logger_thread = threading.Thread(target=log.info, args=("during-flush",), daemon=True)
+    logger_thread.start()
+    logger_thread.join(2)
+    blocked = logger_thread.is_alive()
+
+    stream.release.set()
+    flusher.join(5)
+    assert not blocked
+
+
+def test_each_flush_is_one_write(monkeypatch, tmp_path, restore_root_logging):
+    # Per-record writes (and stats) are what made the flush slow on NFS.
+    stream = _RecordingStream()
+    handler = _file_logging(monkeypatch, tmp_path, stream)
+    log = logging.getLogger("scgrep.test")
+    for i in range(100):
+        log.info("record-%d", i)
+    handler.flush()
+
+    assert len(stream.writes) == 1
+    lines = stream.writes[0].splitlines()
+    assert [line.rsplit(" ", 1)[1] for line in lines] == [f"record-{i}" for i in range(100)]
+
+
+def test_error_is_written_without_waiting_for_the_interval(
+    monkeypatch, tmp_path, restore_root_logging
+):
+    stream = _RecordingStream()
+    _file_logging(monkeypatch, tmp_path, stream, interval="3600")
+    logging.getLogger("scgrep.test").error("error-record")
+
+    deadline = time.monotonic() + 5
+    while not any("error-record" in w for w in stream.writes) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert any("error-record" in w for w in stream.writes)

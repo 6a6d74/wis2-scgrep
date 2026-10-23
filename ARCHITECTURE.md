@@ -280,10 +280,17 @@ with a UTC-timestamped format; the detailed activity logs (connections, messages
 requests/responses, per-result summaries) are at `INFO` — see the
 [README](README.md#logging). `LOG_STDOUT_LEVEL` (default `LOG_LEVEL`) sets a
 higher threshold on the stdout handler alone. When `LOG_FILE` is set, records are also buffered
-and written to that file every `LOG_FILE_FLUSH_INTERVAL` seconds via a
-`MemoryHandler` → `WatchedFileHandler`; the latter reopens the file if it is
-replaced, so the hourly `scripts/purge_logs.py` (the `log-purge` service) can
-trim old entries in place while the app keeps writing.
+and written to that file every `LOG_FILE_FLUSH_INTERVAL` seconds by
+`main._BatchedFileHandler` → `WatchedFileHandler`. The latter reopens the file
+if it is replaced, so the hourly `scripts/purge_logs.py` (the `log-purge`
+service) can trim old entries in place while the app keeps writing.
+
+The batch handler takes the buffer under its lock but writes it outside the
+lock, as one write with one stat. The standard `MemoryHandler` would instead
+hand over each record while holding the lock, with a stat and a flush per
+record. On a network file system (EFS on AWS) a minute of records then took
+10–80 s to write. Every logging thread blocked meanwhile, paho's network
+thread among them, so it missed its keepalive and the broker disconnected.
 
 ### `util.py` — shared helpers
 
